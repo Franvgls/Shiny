@@ -1,0 +1,259 @@
+#' Mapa distribución por edad en la campaña
+#' 
+#' Mapa de la distribución geográfica por edad de la especie en las campañas solicitadas
+#' @param gr Grupo de la especie: Solo hay dados de edad para algunos peces y cigala ? 
+#' @param esp Código de la especie numérico o carácter con tres espacios. 999 para todas las especies del grupo 
+#' @param camp Campaña o campañas a representar en el mapa de un año concreto (XX): Demersales "NXX", Porcupine "PXX", Arsa primavera "1XX" y Arsa otoño "2XX"
+#' @param zona Elige el origen de las bases de datos: Porcupine "porc", Cantábrico "cant", Golfo de Cádiz "arsa". 
+#' @param dns elige si se trabaja con archivos del ordenador ("local") o del servidor ("serv")
+#' @param age Edad solicitada 
+#' @param plus Edad plus: incluir la edad considerada como plus, solo afecta si se pide como plus la edad solicitada que suma todas las edades mayores
+#' @param cor.time Si T corrige las abundancias en función de la duración del lance
+#' @param n.ots Interno para decir que en la clave no se saca el número de otolitos sino proporciones
+#' @param AltAlk Clave talla edad alternativa sin ruta ni extensión, NA por defecto usa la clave de la campaña edadXYY.dbf
+#' @param incl2 si T representa los datos de lances especiales, si F los excluye
+#' @param bw Gráfico en blanco y negro si T o en color si F
+#' @param ti Si T añade titulo al mapa, el nombre de la especie en latín
+#' @param plot Saca el gráfico (T) o lo guarda como objeto para componer con otros gráficos (F)
+#' @param out.dat Si T devuelve los datos como data.frame (compatible con plot=T o F)
+#' @param ind Parámetro a representar saca los datos en "p"eso o "n"úmero
+#' @param idi Nombre científico de la especie ("l") o nombre común ("e")
+#' @param es Si T saca los ejes y leyendas en español, si F lo saca en inglés
+#' @param layout Organización de gráficos en filas columnas c(r,c)
+#' @param ceros Añade puntos para los datos igual a 0 si T, si F no incluye x en los valores 0
+#' @param years Si T permite sacar los años como nombre de campaña en los paneles lattice de campañas
+#' @param mediahora Valor para obtener abundancias por hora si media hora es mayor
+#' @param excl.sect Sectores a excluir como carácter (ej. c("8C","8B") para quedarse solo con 9a).
+#'   NA por defecto no excluye ninguno. Se pasa directamente a datagegr.camp64 y datlan.camp64,
+#'   por lo que actúa sobre los lances antes del cálculo de abundancias por edad.
+#'   Combinado con AltAlk permite usar claves talla-edad específicas de cada división ICES.
+#' @param lances Vector de números de lance a incluir tras el cálculo. NULL (por defecto) incluye todos.
+#'   Filtro post-hoc alternativo a excl.sect cuando se prefiere filtrar por número de lance.
+#' @return Si out.dat=TRUE devuelve un data.frame con columnas: lan,lat,long,0,1,2,...,Age+,camp.
+#'   Si out.dat=FALSE saca el gráfico en pantalla (plot=TRUE) o como objeto trellis (plot=FALSE)
+#'   para combinar con otros gráficos con print.trellis.
+#' @examples 
+#' \dontrun{ 
+#' maphistage64(1,42,c("N24","N25"),"cant","local",age=2)
+#' # Solo división 9a con clave específica:
+#' maphistage64(1,42,"N25","cant","local",age=2,excl.sect=c("8C","8B"),AltAlk="edad942",out.dat=TRUE)
+#' Equivalente directo sin mapa:
+#' datagegr.camp64(1,42,"N25","cant","local",excl.sect=c("8C","8B"),AltAlk="edad942")
+#' }
+#' @family mapas 
+#' @family edades 
+#' @export
+maphistage64 <- function(gr, esp, camp, zona="cant", dns=c("local","serv"),
+                         age, plus=8, cor.time=TRUE, n.ots=FALSE, AltAlk=NA,
+                         incl2=TRUE, bw=TRUE, ti=TRUE, plot=TRUE,
+                         out.dat=FALSE, ind="n", idi="l", es=TRUE,
+                         layout=NA, ceros=FALSE, years=TRUE, mediahora=1,
+                         lances=NULL, excl.sect=NA) {
+  options(scipen=2)
+  dns <- match.arg(dns)
+  if (plot) lattice::trellis.par.set(lattice::col.whitebg())
+  if (length(esp) > 1) stop("Esta función sólo admite una especie")
+
+  # --- Construcción del data.frame con todas las campañas ---
+  ndat  <- length(camp)
+  dumb  <- NULL
+  for (i in 1:ndat) {
+    dat_i <- datagegr.camp64(gr, esp, camp[i], zona, dns, plus,
+                             excl.sect=excl.sect,
+                             cor.time=cor.time, n.ots=n.ots,
+                             AltAlk=AltAlk, incl2=incl2,
+                             mediahora=mediahora)
+    if (!is.null(dat_i)) {
+      dumb <- rbind(dumb, cbind(dat_i, camp=camp[i]))
+    }
+  }
+
+  if (is.null(dumb) || !nrow(dumb))
+    stop("No hay datos para la combinación especie/campaña/zona solicitada")
+
+  # --- Filtro opcional de lances ---
+  # Útil para limitar a una división cuando AltAlk es específica de esa zona
+  if (!is.null(lances)) {
+    dumb <- dumb[dumb$lan %in% lances, , drop=FALSE]
+    if (!nrow(dumb))
+      stop("Ningún lance encontrado con los valores de 'lances' indicados")
+  }
+
+  # --- Año como etiqueta de panel (se guarda dumbcamp antes de sobrescribir camp) ---
+  if (years) {
+    dumbcamp <- dumb
+    dumb$camp <- camptoyear(dumb$camp)
+  }
+  dumb$camp   <- factor(dumb$camp)
+  dumb$numero <- dumb[, age + 5]   # columna de la edad solicitada
+
+  # --- Escala de leyenda (sólo se usa para dibujar) ---
+  # Protegido contra el caso en que la edad solicitada no tenga ningún valor:
+  # max(., na.rm=TRUE) sobre todo-NA devuelve -Inf y reventaba xyplot aguas abajo.
+  maxnum <- max(dumb$numero, na.rm = TRUE)
+  if (!is.finite(maxnum)) {
+    if (!out.dat) {
+      stop("No hay individuos de edad ", age, " para ", esp,
+           " en ", paste(camp, collapse = ", "),
+           ". Prueba otra edad o revisa la ALK (AltAlk).")
+    }
+    leyenda <- NA
+    escala  <- NA
+  } else {
+    leyenda <- signif(maxnum * .9, 1)
+    escala  <- signif(maxnum, 1) * 35 / 100
+  }
+
+  # --- Título ---
+  if (is.logical(ti)) {
+    if (ti) {
+      titulo <- list(
+        label = paste0(buscaesp64(gr, esp, zona, dns, id=idi), "\n",
+                       ifelse(es, "Edad", "Age"), " ",
+                       age, ifelse(plus == age, "+", "")),
+        font  = ifelse(idi=="l", 4, 2),
+        cex   = 1)
+    } else {
+      titulo <- NULL
+    }
+  } else {
+    titulo <- list(label=ti)
+  }
+
+  # --- Color ---
+  if (bw && plot) {
+    colo <- gray(.1)
+    lattice::trellis.par.set("strip.background", list(col=c(gray(.80))))
+  } else {
+    colo <- 4
+  }
+
+  # --- Layout automático ---
+  if (any(is.na(layout))) {
+    layout <- if (ndat != 4) c(1, ndat) else c(2, 2)
+  }
+
+  # --- Mapa según zona ---
+  if (substr(zona, 1, 4) == "porc") {
+    asp <- diff(c(50.5, 54.5)) / (diff(c(-15.5, -10.5)) * cos(mean(c(50.5, 54.5)) * pi/180))
+    mapdist <- lattice::xyplot(lat~long|camp, dumb, layout=layout,
+      xlim=c(-15.5,-10.5), main=titulo, xlab=NULL, ylab=NULL,
+      ylim=c(50.5,54.5), aspect=asp,
+      par.strip.text=list(cex=.7, font=2),
+      scales=list(alternating=FALSE, tck=c(1,0), cex=.7,
+        x=list(at=c(-15:-11), labels=as.character(abs(-15:-11))),
+        y=list(at=(51:54), rot=90)),
+      as.table=TRUE,
+      panel=function(x, y, subscripts=subscripts) {
+        lattice::panel.xyplot(Porc.map$x, Porc.map$y, type="l", lty=3, col=gray(.2))
+        grid::grid.polygon(
+          maps::map(Porc.map, "narr", plot=FALSE)[[1]],
+          maps::map(Porc.map, "narr", plot=FALSE)[[2]],
+          default.units="native", gp=grid::gpar(fill=gray(.7)))
+        if (max(dumb$numero[subscripts], na.rm=TRUE) > 0) {
+          lattice::panel.xyplot(-12.5, 51.2, cex=sqrt(leyenda/escala), pch=16, col=colo)
+          lattice::ltext(-12.5, 51.2,
+            labels=paste(leyenda, ifelse(ind=="p","kg","ind.")),
+            pos=4, offset=1.1, cex=.8)
+        }
+        if (ind=="p") {
+          lattice::panel.xyplot(x, y,
+            cex=ifelse(dumb$peso[subscripts]>0, sqrt(dumb$peso[subscripts]/escala), .35),
+            pch=ifelse(dumb$peso[subscripts]>0, 16, ifelse(ceros,4,NA)), col=colo)
+        } else {
+          lattice::panel.xyplot(x, y,
+            cex=ifelse(dumb$numero[subscripts]>0, sqrt(dumb$numero[subscripts]/escala), .35),
+            pch=ifelse(dumb$numero[subscripts]>0, 16, ifelse(ceros,4,NA)), col=colo)
+        }
+      })
+  }
+
+  if (substr(zona, 1, 4) == "cant") {
+    asp     <- diff(c(41.82, 44.3)) / (diff(c(-10.25, -1.4)) * cos(mean(c(41.82, 44.3)) * pi/180))
+    leyenda <- signif(c(1, .5, .25) * leyenda, 1)
+    mapdist <- lattice::xyplot(lat~long|camp, dumb, layout=layout,
+      xlim=c(-10.25,-1.4), main=titulo, xlab=NULL, ylab=NULL, subscripts=TRUE,
+      ylim=c(41.82,44.3), aspect=asp,
+      par.strip.text=list(cex=.8, font=2),
+      scales=list(alternating=FALSE, tck=c(1,0), cex=.7,
+        x=list(at=c(-10:-2), labels=as.character(abs(-10:-2))),
+        y=list(at=seq(42,44,by=1), rot=90)),
+      as.table=TRUE,
+      panel=function(x, y, subscripts=subscripts) {
+        lattice::panel.xyplot(Nort.str$x, Nort.str$y, type="l", lty=3, col=gray(.4))
+        grid::grid.polygon(
+          maps::map(Nort.map, "Costa", plot=FALSE)[[1]],
+          maps::map(Nort.map, "Costa", plot=FALSE)[[2]],
+          default.units="native", gp=grid::gpar(fill=gray(.8)))
+        if (max(dumb$numero[subscripts], na.rm=TRUE) > 0) {
+          lattice::panel.xyplot(rep(-7,3), c(43., 42.60, 42.20),
+            cex=sqrt(leyenda/escala), pch=16, col=colo)
+          lattice::ltext(rep(-7,3), c(43., 42.60, 42.20),
+            labels=paste(leyenda, ifelse(ind=="p","kg","ind.")),
+            pos=4, offset=1.1, cex=.7)
+        }
+        if (ind=="p") {
+          lattice::panel.xyplot(x, y,
+            cex=ifelse(dumb$peso[subscripts]>0, sqrt(dumb$peso[subscripts]/escala), .4),
+            pch=ifelse(dumb$peso[subscripts]>0, 16, 19), col=colo)
+        } else {
+          lattice::panel.xyplot(x, y,
+            cex=ifelse(dumb$numero[subscripts]>0, sqrt(dumb$numero[subscripts]/escala), .35),
+            pch=ifelse(dumb$numero[subscripts]>0, 16, ifelse(ceros,4,NA)), col=colo)
+        }
+      })
+  }
+
+  if (zona == "arsa") {
+    asp     <- diff(c(35.95, 37.30)) / (diff(c(-8.1, -5.5)) * cos(mean(c(35.95, 37.30)) * pi/180))
+    leyenda <- signif(c(1, .5, .25) * leyenda, 1)
+    mapdist <- lattice::xyplot(lat~long|camp, dumb, layout=layout,
+      xlim=c(-8.1,-5.5), main=titulo, xlab=NULL, ylab=NULL, subscripts=TRUE,
+      ylim=c(35.95,37.30), aspect=asp,
+      par.strip.text=list(cex=.8, font=2),
+      par.strip.background=list(col=c(gray(.8))),
+      scales=list(alternating=FALSE, tck=c(1,0), cex=.8,
+        x=list(at=c(-8:-6), labels=as.character(abs(-8:-6))),
+        y=list(at=seq(36,37,by=1), rot=90)),
+      as.table=TRUE,
+      panel=function(x, y, subscripts=subscripts) {
+        lattice::panel.xyplot(Arsa.str$x, Arsa.str$y, type="l", lty=3, col=gray(.4))
+        grid::grid.polygon(
+          maps::map(Arsa.map, c("Portugal","Costa"), plot=FALSE)[[1]],
+          maps::map(Arsa.map, c("Portugal","Costa"), plot=FALSE)[[2]],
+          default.units="native", gp=grid::gpar(fill=gray(.8)))
+        if (max(dumb$numero[subscripts], na.rm=TRUE) > 0) {
+          lattice::panel.xyplot(rep(-6,3), c(36.3, 36.4, 36.5),
+            cex=sqrt(leyenda/escala), pch=16, col=colo)
+          lattice::ltext(rep(-6,3), c(36.3, 36.4, 36.5),
+            labels=paste(leyenda, ifelse(ind=="p","kg","ind.")),
+            pos=4, offset=.8, cex=.7)
+        }
+        if (ind=="p") {
+          lattice::panel.xyplot(x, y,
+            pch=ifelse(dumb$peso[subscripts]>0, 16, ifelse(ceros,4,NA)),
+            cex=ifelse(dumb$peso[subscripts]>0, sqrt(dumb$peso[subscripts]/escala), .35),
+            col=colo)
+        } else {
+          lattice::panel.xyplot(x, y,
+            cex=ifelse(dumb$numero[subscripts]>0, sqrt(dumb$numero[subscripts]/escala), .35),
+            pch=ifelse(dumb$numero[subscripts]>0, 16, ifelse(ceros,4,NA)), col=colo)
+        }
+      })
+  }
+
+  # --- Salida ---
+  # plot=TRUE  → pinta en pantalla (pero no impide devolver datos si out.dat=TRUE)
+  # plot=FALSE → devuelve objeto trellis para componer con print.trellis + more=TRUE
+  # out.dat=TRUE → devuelve data.frame (compatible con cualquier valor de plot)
+
+  if (plot) print(mapdist)
+
+  if (out.dat) {
+    if (years) dumb <- dumbcamp
+    if (!ceros) dumb <- dumb[rowSums(dumb[, 5:c(ncol(dumb)-2)]) > 0, , drop=FALSE]
+    return(dumb[, 1:c(ncol(dumb)-1)])
+  }
+
+  if (!plot) return(mapdist)
+}

@@ -1,0 +1,7 @@
+.Rproj.user
+.Rhistory
+.DS_Store
+inst/extdata
+data-raw
+.RData
+.quarto
