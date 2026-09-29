@@ -10,6 +10,12 @@
 ## auto-detected; if it contains several (NS-IBTS), the user picks one for
 ## per-fleet analysis, or "All" to work across countries.
 ##
+## Outlier proposal: a robust fit (MASS::rlm, y ~ log(Depth), linear for
+## Warplngt) per SweepLngt group draws a band fit +/- k robust sigma, and
+## "Propose outliers" pre-selects the hauls outside it. The proposal only
+## selects; the user reviews (table sorted by |z|, click to deselect) and
+## deletion requires confirmation.
+##
 ## Deleting selected rows always removes them from the full dataset (not just
 ## the filtered view). Restore rewinds to the last download.
 ##
@@ -46,6 +52,18 @@ outliersUI <- function(id) {
                     choices = c("All"), selected = "All"),
         uiOutput(ns("country_hint")),
         hr(),
+        h5("Robust fit / outlier proposal"),
+        checkboxInput(ns("show_band"), "Show robust band (rlm)", value = TRUE),
+        numericInput(ns("k_sigma"), "Threshold (robust \u03C3):",
+                     value = 3, min = 1, max = 10, step = 0.5),
+        actionButton(ns("btn_propose"), "\U0001F50D Propose outliers",
+                     class = "btn-warning"),
+        actionButton(ns("btn_clear"), "Clear selection"),
+        helpText(tags$small(
+          "Pre-selects hauls of the current tab outside the robust band, ",
+          "per SweepLngt group. Nothing is deleted: review them in the ",
+          "table and click to deselect before deleting.")),
+        hr(),
         actionButton(ns("btn_delete"),  "\U0001F5D1\uFE0F Delete selected rows",
                      class = "btn-danger"),
         actionButton(ns("btn_restore"), "\u21BA Restore original"),
@@ -63,27 +81,28 @@ outliersUI <- function(id) {
         tabsetPanel(id = ns("plots_tabs"),
                     tabPanel("WarpLength vs Depth", value = "warp",
                              plotOutput(ns("plot_warp"), height = "550px",
-                                        click = ns("click_plot")),
-                             h4("Selected rows:"),
-                             DT::DTOutput(ns("table_selected"))),
+                                        click = ns("click_plot"))),
                     tabPanel("WingSpread vs Depth", value = "wing",
                              plotOutput(ns("plot_wing"), height = "550px",
-                                        click = ns("click_plot")),
-                             h4("Selected rows:"),
-                             DT::DTOutput(ns("table_selected"))),
+                                        click = ns("click_plot"))),
                     tabPanel("DoorSpread vs Depth", value = "door",
                              plotOutput(ns("plot_door"), height = "550px",
-                                        click = ns("click_plot")),
-                             h4("Selected rows:"),
-                             DT::DTOutput(ns("table_selected"))),
+                                        click = ns("click_plot"))),
                     tabPanel("Netopening vs Depth", value = "net",
                              plotOutput(ns("plot_net"), height = "550px",
-                                        click = ns("click_plot")),
-                             h4("Selected rows:"),
-                             DT::DTOutput(ns("table_selected"))),
-                    tabPanel("All data preview",
+                                        click = ns("click_plot"))),
+                    tabPanel("All data preview", value = "all",
                              DT::DTOutput(ns("table_all")))
-        )
+        ),
+        # Single instance (an output id can only be bound once in the page)
+        conditionalPanel(
+          condition = sprintf("input['%s'] != 'all'", ns("plots_tabs")),
+          h4("Selected rows:"),
+          helpText(tags$small(
+            "z = robust residual of the current tab variable, in robust \u03C3 ",
+            "units (sorted by |z|). Hauls with |z| above the threshold fall ",
+            "outside the band.")),
+          DT::DTOutput(ns("table_selected")))
       )
     )
   )
@@ -249,46 +268,94 @@ outliersServer <- function(id) {
     # for plotting but full df for locating selected points (so a
     # selection made in one country filter is still shown if the user
     # switches; those in other countries fall outside xlim/ylim).
-    draw_by_sweep <- function(dfp, yvar, regression_type = c("log","linear")) {
+    sweep_pal <- c("steelblue","darkorange","darkgreen","purple",
+                   "brown","magenta","cyan4","gold3")
+
+    # Splits by SweepLngt (sorted); a single "All" group when not available
+    sweep_groups <- function(dfp) {
+      if ("SweepLngt" %in% names(dfp) && any(!is.na(dfp$SweepLngt))) {
+        dfp <- dfp[!is.na(dfp$SweepLngt), , drop = FALSE]
+        split(dfp, dfp$SweepLngt)
+      } else list(All = dfp)
+    }
+
+    fit_formula <- function(yvar, regression_type) {
+      if (regression_type == "log") as.formula(paste(yvar, "~ log(Depth)"))
+      else as.formula(paste(yvar, "~ Depth"))
+    }
+
+    # Robust fit (Huber M-estimator, MASS::rlm). Its scale (mod$s) is a
+    # MAD-type estimate, so clear outliers do not widen the band that is
+    # used to detect them (unlike the OLS sigma).
+    robust_fit <- function(sub, yvar, regression_type) {
+      if (nrow(sub) <= 5 || diff(range(sub$Depth)) <= 0) return(NULL)
+      mod <- tryCatch(suppressWarnings(
+        MASS::rlm(fit_formula(yvar, regression_type), data = sub, maxit = 100)),
+        error = function(e) NULL)
+      if (is.null(mod) || !is.finite(mod$s) || mod$s <= 0) return(NULL)
+      mod
+    }
+
+    # Robust residual of each haul in robust-sigma units, per sweep group
+    robust_scores <- function(dfv, yvar, regression_type) {
+      if (is.null(dfv) || nrow(dfv) == 0 || !(yvar %in% names(dfv))) return(NULL)
+      dfv$Depth   <- suppressWarnings(as.numeric(dfv$Depth))
+      dfv[[yvar]] <- suppressWarnings(as.numeric(dfv[[yvar]]))
+      dfp <- dfv[!is.na(dfv$Depth) & !is.na(dfv[[yvar]]), , drop = FALSE]
+      out <- lapply(sweep_groups(dfp), function(sub) {
+        mod <- robust_fit(sub, yvar, regression_type)
+        if (is.null(mod)) return(NULL)
+        data.frame(.rowid = sub$.rowid,
+                   z = round((sub[[yvar]] - predict(mod, newdata = sub)) / mod$s, 2))
+      })
+      out <- do.call(rbind, out)
+      if (is.null(out)) NULL else out
+    }
+
+    draw_by_sweep <- function(dfp, yvar, regression_type = c("log","linear"),
+                              show_band = FALSE, k = 3) {
       regression_type <- match.arg(regression_type)
-      if ("SweepLngt" %in% names(dfp)) {
-        tipos <- sort(unique(na.omit(dfp$SweepLngt)))
-      } else tipos <- character(0)
-      pal <- c("steelblue","darkorange","darkgreen","purple",
-               "brown","magenta","cyan4","gold3")
-      if (length(tipos) == 0) {
-        points(dfp$Depth, dfp[[yvar]], pch = 21, bg = "grey", col = "black")
-        return(invisible(NULL))
-      }
-      labels <- character(0)
-      for (i in seq_along(tipos)) {
-        t <- tipos[i]
-        sub <- dfp[dfp$SweepLngt == t &
-                     !is.na(dfp$Depth) & !is.na(dfp[[yvar]]), , drop = FALSE]
+      groups    <- sweep_groups(dfp)
+      has_sweep <- !identical(names(groups), "All")
+      labels <- character(0); cols <- character(0)
+      for (i in seq_along(groups)) {
+        sub <- groups[[i]]
         if (nrow(sub) == 0) next
-        points(sub$Depth, sub[[yvar]], pch = 21, bg = pal[i], col = "black")
-        rng <- range(sub$Depth, na.rm = TRUE)
-        if (nrow(sub) > 5 && diff(rng) > 0) {
-          fmla <- if (regression_type == "log")
-            as.formula(paste(yvar, "~ log(Depth)"))
-          else as.formula(paste(yvar, "~ Depth"))
-          mod <- tryCatch(lm(fmla, data = sub), error = function(e) NULL)
+        col_i <- if (has_sweep) sweep_pal[(i - 1) %% length(sweep_pal) + 1] else "grey"
+        points(sub$Depth, sub[[yvar]], pch = 21, bg = col_i, col = "black")
+        rng  <- range(sub$Depth, na.rm = TRUE)
+        dseq <- seq(rng[1], rng[2], length.out = 200)
+        nd   <- data.frame(Depth = dseq)
+        if (show_band) {
+          mod <- robust_fit(sub, yvar, regression_type)
           if (!is.null(mod)) {
-            dseq  <- seq(rng[1], rng[2], length.out = 200)
-            preds <- tryCatch(predict(mod, newdata = data.frame(Depth = dseq)),
-                              error = function(e) NULL)
-            if (!is.null(preds)) lines(dseq, preds, col = pal[i], lwd = 2)
+            fit <- predict(mod, newdata = nd)
+            lines(dseq, fit, col = col_i, lwd = 2)
+            lines(dseq, fit + k * mod$s, col = col_i, lwd = 1.5, lty = 2)
+            lines(dseq, fit - k * mod$s, col = col_i, lwd = 1.5, lty = 2)
           }
+        } else if (nrow(sub) > 5 && diff(rng) > 0) {
+          mod <- tryCatch(lm(fit_formula(yvar, regression_type), data = sub),
+                          error = function(e) NULL)
+          if (!is.null(mod)) lines(dseq, predict(mod, newdata = nd), col = col_i, lwd = 2)
         }
-        labels <- c(labels, paste0("Sweep=", t,
+        labels <- c(labels, paste0(if (has_sweep) paste0("Sweep=", names(groups)[i]) else "All",
                                    " (", round(rng[1]), "\u2013", round(rng[2]),
                                    "m, n=", nrow(sub), ")"))
+        cols <- c(cols, col_i)
       }
-      legend("topright", legend = labels, bty = "n", cex = 0.85)
+      if (show_band) {
+        labels <- c(labels, paste0("Robust fit (rlm) \u00b1 ", k, " robust \u03c3"))
+        cols   <- c(cols, "black")
+      }
+      legend("topright", legend = labels, text.col = cols, bty = "n", cex = 0.85)
     }
 
     # Generic plot function replacing four almost-identical renderPlots
-    plot_var <- function(dfv, yvar, ylab, main_title, regression_type) {
+    # y_from_zero = TRUE draws the y axis from 0 to max * 1.1 (physical
+    # magnitudes such as net opening read better against a zero baseline).
+    plot_var <- function(dfv, yvar, ylab, main_title, regression_type,
+                         y_from_zero = FALSE) {
       if (is.null(dfv) || nrow(dfv) == 0) {
         plot.new(); title("No data. Click 'Download HH from DATRAS' to load data.")
         return()
@@ -302,11 +369,14 @@ outliersServer <- function(id) {
       if (nrow(dfp) == 0) {
         plot.new(); title(paste("No valid", yvar, "vs Depth points.")); return()
       }
+      ylim <- if (y_from_zero) c(0, max(dfp[[yvar]], na.rm = TRUE) * 1.1)
+              else range(dfp[[yvar]], na.rm = TRUE)
       plot(NA,
            xlim = range(dfp$Depth, na.rm = TRUE),
-           ylim = range(dfp[[yvar]], na.rm = TRUE),
+           ylim = ylim,
            xlab = "Depth (m)", ylab = ylab, main = main_title)
-      draw_by_sweep(dfp, yvar, regression_type = regression_type)
+      draw_by_sweep(dfp, yvar, regression_type = regression_type,
+                    show_band = isTRUE(input$show_band), k = k_sigma())
 
       # overlay selected rows (from full current_df, but only if visible)
       sel <- selected_ids()
@@ -323,6 +393,25 @@ outliersServer <- function(id) {
       }
     }
 
+    # Variable and model for each plot tab
+    var_info <- list(
+      warp = list(yvar = "Warplngt",   reg = "linear"),
+      wing = list(yvar = "WingSpread", reg = "log"),
+      door = list(yvar = "DoorSpread", reg = "log"),
+      net  = list(yvar = "Netopening", reg = "log"))
+
+    k_sigma <- reactive({
+      k <- suppressWarnings(as.numeric(input$k_sigma))
+      if (length(k) == 0 || is.na(k) || k <= 0) 3 else k
+    })
+
+    # Robust scores for the variable of the current tab (NULL on preview tab)
+    current_scores <- reactive({
+      tab <- input$plots_tabs
+      if (is.null(tab) || !tab %in% names(var_info)) return(NULL)
+      robust_scores(df_view(), var_info[[tab]]$yvar, var_info[[tab]]$reg)
+    })
+
     output$plot_warp <- renderPlot({
       plot_var(df_view(), "Warplngt",  "Warplngt (m)",    "Warplngt vs Depth",   "linear")
     })
@@ -333,20 +422,40 @@ outliersServer <- function(id) {
       plot_var(df_view(), "DoorSpread", "DoorSpread (m)",  "DoorSpread vs Depth", "log")
     })
     output$plot_net <- renderPlot({
-      plot_var(df_view(), "Netopening", "Netopening (m)", "Net opening vs Depth","log")
+      plot_var(df_view(), "Netopening", "Netopening (m)", "Net opening vs Depth","log",
+               y_from_zero = TRUE)
     })
+
+    # -------- Outlier proposal (only selects, never deletes) --------
+    observeEvent(input$btn_propose, {
+      tab <- input$plots_tabs
+      if (is.null(tab) || !tab %in% names(var_info)) {
+        showNotification("Open one of the variable tabs first.", type = "warning"); return()
+      }
+      sc <- current_scores()
+      if (is.null(sc) || nrow(sc) == 0) {
+        showNotification("Not enough data to fit the robust model.", type = "warning"); return()
+      }
+      k    <- k_sigma()
+      flag <- sc$.rowid[abs(sc$z) > k]
+      prev <- selected_ids()
+      selected_ids(unique(c(prev, flag)))
+      showNotification(
+        paste0(length(flag), " haul(s) beyond ", k, " robust σ in ",
+               var_info[[tab]]$yvar, " (", length(setdiff(flag, prev)),
+               " newly selected). Review them before deleting."),
+        type = "message", duration = 8)
+    })
+
+    observeEvent(input$btn_clear, { selected_ids(integer(0)) })
 
     # -------- Click handler --------
     observeEvent(input$click_plot, {
       dfv <- df_view()
       if (is.null(dfv) || nrow(dfv) == 0) return()
-      tab <- isolate(input$plots_tabs); if (is.null(tab)) tab <- "warp"
-      yvar <- switch(tab,
-                     "warp" = "Warplngt",
-                     "wing" = "WingSpread",
-                     "door" = "DoorSpread",
-                     "net"  = "Netopening",
-                     "Warplngt")
+      tab <- isolate(input$plots_tabs)
+      if (is.null(tab) || !tab %in% names(var_info)) tab <- "warp"
+      yvar <- var_info[[tab]]$yvar
       if (!(yvar %in% names(dfv))) return()
       dfv$Depth   <- suppressWarnings(as.numeric(dfv$Depth))
       dfv[[yvar]] <- suppressWarnings(as.numeric(dfv[[yvar]]))
@@ -365,6 +474,8 @@ outliersServer <- function(id) {
     })
 
     # -------- Delete / Restore --------
+    # Deleting asks for confirmation first (selection may come from the
+    # automatic proposal and must be reviewed).
     observeEvent(input$btn_delete, {
       df <- current_df()
       if (is.null(df)) return()
@@ -372,6 +483,22 @@ outliersServer <- function(id) {
       if (length(sel) == 0) {
         showNotification("No rows selected to delete.", type = "warning"); return()
       }
+      showModal(modalDialog(
+        title = "Confirm deletion",
+        paste0("Delete ", length(sel), " selected haul(s) from the working ",
+               "dataset? (They can be recovered with 'Restore original', ",
+               "which also discards any other deletion.)"),
+        footer = tagList(modalButton("Cancel"),
+                         actionButton(session$ns("confirm_delete"), "Delete",
+                                      class = "btn-danger"))))
+    })
+
+    observeEvent(input$confirm_delete, {
+      removeModal()
+      df <- current_df()
+      if (is.null(df)) return()
+      sel <- selected_ids()
+      if (length(sel) == 0) return()
       keep <- !(df$.rowid %in% sel)
       df2  <- df[keep, , drop = FALSE]
       df2$.rowid <- seq_len(nrow(df2))
@@ -388,21 +515,31 @@ outliersServer <- function(id) {
       showNotification("Restored original downloaded data.", type = "message")
     })
 
-    # -------- Tables (single output referenced from 4 tabs) --------
+    # -------- Tables --------
+    # Selected rows plus their robust z for the current tab variable,
+    # sorted by |z| so the clearest outliers come first.
     selected_table_df <- reactive({
       df <- current_df()
       if (is.null(df)) return(NULL)
       sel <- selected_ids()
       if (length(sel) == 0) return(NULL)
       dfsel <- df[df$.rowid %in% sel, , drop = FALSE]
-      keep <- intersect(keepcols_std, names(dfsel))
-      dfsel[, keep, drop = FALSE]
+      keep  <- intersect(keepcols_std, names(dfsel))
+      out   <- dfsel[, keep, drop = FALSE]
+      sc    <- current_scores()
+      if (!is.null(sc)) {
+        z <- sc$z[match(dfsel$.rowid, sc$.rowid)]
+        out <- cbind(z = z, out)
+        out <- out[order(-abs(out$z), na.last = TRUE), , drop = FALSE]
+      }
+      out
     })
 
     output$table_selected <- DT::renderDT({
       dat <- selected_table_df()
       if (is.null(dat)) return(NULL)
-      DT::datatable(dat, options = list(dom = 't', paging = FALSE, scrollX = TRUE),
+      DT::datatable(dat, options = list(dom = 't', paging = FALSE, scrollX = TRUE,
+                                        scrollY = "300px", scrollCollapse = TRUE),
                     rownames = FALSE)
     })
 

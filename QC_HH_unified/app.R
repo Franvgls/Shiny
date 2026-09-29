@@ -1,6 +1,7 @@
 ## Master app for QC of HH survey data
-## Loads a single HH CSV file at the top level, then dispatches to different
-## QC modules via tabs. Gear vs Depth manages its own two files, and Outliers
+## Outliers is the first tab: the workflow starts by cleaning the DATRAS
+## historical series. Then a single HH CSV file (current campaign) is loaded
+## at the top level and dispatched to different QC modules via tabs. Gear vs Depth manages its own two files, and Outliers
 ## downloads its own data straight from DATRAS; both are independent flows
 ## kept under the same navbar for convenience.
 ##
@@ -61,6 +62,8 @@ ui <- tagList(
         id    = "mainnav",
         theme = bslib::bs_theme(version = 5, bootswatch = "minty"),
 
+        tabPanel("Outliers",      outliersUI("outliers")),
+
         tabPanel("Upload HH",
                  sidebarLayout(
                      sidebarPanel(
@@ -78,8 +81,7 @@ ui <- tagList(
 
         tabPanel("QC Dist",       qcDistUI("qc_dist")),
         tabPanel("QC Posit",      qcPositUI("qc_posit")),
-        tabPanel("Gear vs Depth", gearDepthUI("gear")),
-        tabPanel("Outliers",      outliersUI("outliers"))
+        tabPanel("Gear vs Depth", gearDepthUI("gear"))
 
         # Coming later:
         # tabPanel("Map Hist", mapHistUI("map_hist"))
