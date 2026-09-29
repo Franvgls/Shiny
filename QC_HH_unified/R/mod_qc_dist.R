@@ -11,17 +11,16 @@
 ## where hh_data is a reactiveVal holding the loaded HH data.frame.
 
 
-# ---- Helper: compute error columns (mirrors qcHaulsDist internals) ----
-.compute_qc_errors <- function(df) {
+# ---- Helper: coerce HH columns to numeric and DATRAS -9 -> NA ----
+# Error columns are NOT computed here: the click handler uses the table
+# returned by qcHaulsDist(allHauls = TRUE), i.e. exactly the plotted values
+# (including its haversine fill of missing Distance and its roundings).
+.prep_qc_hh <- function(df) {
     if (is.null(df) || nrow(df) == 0) return(df)
-
-    numify <- function(x) suppressWarnings(as.numeric(x))
     for (col in c("HaulNo","Year","Quarter","Distance","GroundSpeed",
                   "HaulDur","TowDir","ShootLong","ShootLat","HaulLong","HaulLat")) {
-        if (col %in% names(df)) df[[col]] <- numify(df[[col]])
+        if (col %in% names(df)) df[[col]] <- suppressWarnings(as.numeric(df[[col]]))
     }
-
-    # DATRAS -9 sentinel -> NA
     for (col in c("Distance","GroundSpeed","TowDir","HaulDur",
                   "ShootLat","ShootLong","HaulLat","HaulLong")) {
         if (col %in% names(df)) {
@@ -29,42 +28,10 @@
             df[[col]][bad] <- NA
         }
     }
-
-    dist_vel <- (df$HaulDur / 60) * df$GroundSpeed * 1852
-    ok_hf <- !is.na(df$ShootLong) & !is.na(df$ShootLat) &
-             !is.na(df$HaulLong)  & !is.na(df$HaulLat)
-    dist_hf <- rep(NA_real_, nrow(df))
-    if (any(ok_hf)) {
-        dist_hf[ok_hf] <- geosphere::distHaversine(
-            as.matrix(df[ok_hf, c("ShootLong","ShootLat")]),
-            as.matrix(df[ok_hf, c("HaulLong","HaulLat")]))
-    }
-    vel_dist <- (dist_hf / 1852) / (df$HaulDur / 60)
-
-    err_dist <- ifelse(!is.na(df$Distance) & df$Distance != 0,
-                       (dist_hf - df$Distance) * 100 / df$Distance, NA_real_)
-    err_vel  <- ifelse(!is.na(df$Distance) & df$Distance != 0,
-                       (dist_vel - df$Distance) * 100 / df$Distance, NA_real_)
-
-    rumb <- rep(NA_real_, nrow(df))
-    if (any(ok_hf)) {
-        rumb[ok_hf] <- geosphere::bearingRhumb(
-            as.matrix(df[ok_hf, c("ShootLong","ShootLat")]),
-            as.matrix(df[ok_hf, c("HaulLong","HaulLat")]))
-    }
-    err_rumb <- ifelse(!is.na(rumb) & !is.na(df$TowDir), rumb - df$TowDir, NA_real_)
-
-    df$dist.vel   <- dist_vel
-    df$dist.hf    <- round(dist_hf)
-    df$vel.dist   <- round(vel_dist, 1)
-    df$error.dist <- round(err_dist, 2)
-    df$error.vel  <- round(err_vel, 2)
-    df$rumb       <- round(rumb, 1)
-    df$error.rumb <- round(err_rumb, 1)
     df
 }
 
-.cols_dist <- c("Survey","Year","Quarter","Country","HaulNo",
+.cols_dist <- c("Survey","Year","Quarter","quarter","Country","HaulNo",
                 "Distance","GroundSpeed","HaulDur","TowDir",
                 "dist.hf","dist.vel","vel.dist",
                 "error.dist","error.vel","rumb","error.rumb")
@@ -150,6 +117,7 @@ qcDistServer <- function(id, hh_data) {
 
         # --- Reset selected point when country changes ---
         selected <- reactiveVal(NULL)
+        plotted  <- reactiveVal(NULL)   # table returned by qcHaulsDist for the current plot
         observeEvent(input$country, {
             selected(NULL)
         }, ignoreInit = TRUE)
@@ -181,6 +149,18 @@ qcDistServer <- function(id, hh_data) {
             cat("Year/Quarter:  ", sub$yr, " / ", sub$qt, "\n", sep = "")
             cat("Country filter:", sub$country, "\n", sep = " ")
             cat("Hauls in view: ", nrow(sub$df), "\n", sep = "")
+            # qcHaulsDist fills missing Distance with the haversine distance
+            # between shoot and haul positions, so the Dist error of those
+            # hauls is ~0 by construction (only rounding) and not informative.
+            d <- .prep_qc_hh(sub$df)
+            if ("Distance" %in% names(d)) {
+                n_na <- sum(is.na(d$Distance))
+                if (n_na > 0)
+                    cat("\n⚠️ Distance missing (-9/NA) in ", n_na, " of ", nrow(d),
+                        " hauls: replaced by haversine distance between positions.\n",
+                        "   Dist error is ~0 for them (not informative); Speed error ",
+                        "compares speed x duration with that distance.\n", sep = "")
+            }
         })
 
         # --- Main plot ---
@@ -189,16 +169,18 @@ qcDistServer <- function(id, hh_data) {
             validate(need(nrow(sub$df) > 0,
                           "No records for current Survey/Year/Quarter/Country selection."))
 
-            df_plot <- .compute_qc_errors(sub$df)
-
-            NeAtlIBTS64::qcHaulsDist(
-                Survey   = df_plot,
+            # allHauls = TRUE returns the table the plot was drawn from; it is
+            # stored so clicks are matched against exactly the plotted values.
+            res <- NeAtlIBTS64::qcHaulsDist(
+                Survey   = .prep_qc_hh(sub$df),
                 years    = sub$yr,
                 quarter  = sub$qt,
                 getICES  = FALSE,
+                allHauls = TRUE,
                 error    = input$errorType,
                 pc.error = input$pcerror
             )
+            plotted(if (is.data.frame(res)) res else NULL)
 
             # Highlight selected point (mono-country only)
             sel <- selected()
@@ -220,8 +202,8 @@ qcDistServer <- function(id, hh_data) {
             if (is.null(input$country) || input$country == "All") {
                 selected(NULL); return()
             }
-            sub <- qc_subset()
-            df_plot <- .compute_qc_errors(sub$df)
+            df_plot <- plotted()
+            if (is.null(df_plot) || nrow(df_plot) == 0) { selected(NULL); return() }
 
             ev <- switch(input$errorType,
                          "Dist"   = "error.dist",
