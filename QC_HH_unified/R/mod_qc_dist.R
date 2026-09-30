@@ -118,6 +118,7 @@ qcDistServer <- function(id, hh_data) {
         # --- Reset selected point when country changes ---
         selected <- reactiveVal(NULL)
         plotted  <- reactiveVal(NULL)   # table returned by qcHaulsDist for the current plot
+        plot_warn <- reactiveVal(character(0))   # warnings raised while plotting
         observeEvent(input$country, {
             selected(NULL)
         }, ignoreInit = TRUE)
@@ -161,6 +162,7 @@ qcDistServer <- function(id, hh_data) {
                         "   Dist error is ~0 for them (not informative); Speed error ",
                         "compares speed x duration with that distance.\n", sep = "")
             }
+            for (msg in plot_warn()) cat("\n⚠️ ", msg, "\n", sep = "")
         })
 
         # --- Main plot ---
@@ -171,15 +173,23 @@ qcDistServer <- function(id, hh_data) {
 
             # allHauls = TRUE returns the table the plot was drawn from; it is
             # stored so clicks are matched against exactly the plotted values.
-            res <- NeAtlIBTS64::qcHaulsDist(
-                Survey   = .prep_qc_hh(sub$df),
-                years    = sub$yr,
-                quarter  = sub$qt,
-                getICES  = FALSE,
-                allHauls = TRUE,
-                error    = input$errorType,
-                pc.error = input$pcerror
-            )
+            # Warnings (e.g. hauls left out for missing positions) are
+            # collected and shown in the info panel.
+            w <- character(0)
+            res <- withCallingHandlers(
+                NeAtlIBTS64::qcHaulsDist(
+                    Survey   = .prep_qc_hh(sub$df),
+                    years    = sub$yr,
+                    quarter  = sub$qt,
+                    getICES  = FALSE,
+                    allHauls = TRUE,
+                    error    = input$errorType,
+                    pc.error = input$pcerror
+                ),
+                warning = function(x) {
+                    w <<- c(w, conditionMessage(x)); invokeRestart("muffleWarning")
+                })
+            plot_warn(unique(w))
             plotted(if (is.data.frame(res)) res else NULL)
 
             # Highlight selected point (mono-country only)

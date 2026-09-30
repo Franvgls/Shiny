@@ -204,7 +204,11 @@ gearDepthServer <- function(id) {
             all_x <- c(hist$Depth,   if (!is.null(cur)) cur$Depth)
             all_y <- c(hist[[yvar]], if (!is.null(cur)) cur[[yvar]])
             xlim <- if (length(all_x) > 0) range(all_x, na.rm = TRUE) else c(0, 1)
-            ylim <- if (length(all_y) > 0) range(all_y, na.rm = TRUE) else c(0, 1)
+            # Net opening is read against the seabed: y axis from 0 to max * 1.1.
+            # Door/wing spread and warp keep the data range (R adds 4% margin).
+            ylim <- if (length(all_y) == 0) c(0, 1)
+                    else if (yvar == "Netopening") c(0, max(all_y, na.rm = TRUE) * 1.1)
+                    else range(all_y, na.rm = TRUE)
 
             plot_main <- if (is.null(ctry) || ctry == "All") {
                 paste("Depth vs", yvar)

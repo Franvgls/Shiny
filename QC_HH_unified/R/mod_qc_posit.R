@@ -90,6 +90,8 @@ qcPositServer <- function(id, hh_data) {
             selected(NULL)
         }, ignoreInit = TRUE)
 
+        plot_warn <- reactiveVal(character(0))   # warnings raised while plotting
+
         # --- Filtered subset (Survey/Year/Quarter + country) ---
         posit_subset <- reactive({
             df <- hh_data()
@@ -117,6 +119,7 @@ qcPositServer <- function(id, hh_data) {
             cat("Year/Quarter:  ", sub$yr, " / ", sub$qt, "\n", sep = "")
             cat("Country filter:", sub$country, "\n", sep = " ")
             cat("Hauls in view: ", nrow(sub$df), "\n", sep = "")
+            for (msg in plot_warn()) cat("\n⚠️ ", msg, "\n", sep = "")
         })
 
         # --- Main plot ---
@@ -125,14 +128,22 @@ qcPositServer <- function(id, hh_data) {
             validate(need(nrow(sub$df) > 0,
                           "No records for current Survey/Year/Quarter/Country selection."))
 
-            NeAtlIBTS64::qcHaulsPosit(
-                Survey  = sub$df,
-                years   = sub$yr,
-                quarter = sub$qt,
-                getICES = FALSE,
-                Hpoints = (input$graf == "Points"),
-                ti      = FALSE
-            )
+            # Warnings (e.g. hauls with missing positions) are collected
+            # and shown in the info panel.
+            w <- character(0)
+            withCallingHandlers(
+                NeAtlIBTS64::qcHaulsPosit(
+                    Survey  = sub$df,
+                    years   = sub$yr,
+                    quarter = sub$qt,
+                    getICES = FALSE,
+                    Hpoints = (input$graf == "Points"),
+                    ti      = FALSE
+                ),
+                warning = function(x) {
+                    w <<- c(w, conditionMessage(x)); invokeRestart("muffleWarning")
+                })
+            plot_warn(unique(w))
 
             # Highlight selected haul (click works in single-panel plots)
             sel <- selected()
