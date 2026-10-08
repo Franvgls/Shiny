@@ -5,3 +5,23 @@ inst/extdata
 data-raw
 .RData
 .quarto
+
+# Imágenes de prueba en la raíz o en la carpeta de cada app
+# (los logos y recursos de la app van en <app>/www y siguen permitidos)
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.bmp
+/*.tif
+/*.tiff
+/*.svg
+/*/*.png
+/*/*.jpg
+/*/*.jpeg
+/*/*.gif
+/*/*.bmp
+/*/*.tif
+/*/*.tiff
+/*/*.svg
+Rplots.pdf
